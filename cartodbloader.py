@@ -38,6 +38,7 @@ parser = OptionParser(usage="usage: %prog [options] target_table source_file")
 parser.add_option("-k", "--apikey", dest="apikey", help="API key for CartoDB")
 parser.add_option("-a", "--account", dest="account", default="frederiksberg", help="CartoDB account name")
 parser.add_option("-u", "--url", dest="url", help="Custom URL endpoint")
+parser.add_option("-c", "--chunk-size", type="int", dest="chunk_size", default=50, help="Chunk size of bulk inserts")
 (options, args) = parser.parse_args()
 
 # Check if required arguments are present
@@ -97,17 +98,19 @@ def run_query(q):
         sys.stderr.write('----------------\n')
         return(False)
 
+def chunks(l, n):
+    """Yield successive n-sized chunks from l."""
+    for i in xrange(0, len(l), n):
+        yield l[i:i+n]
+
 # Check if the target table is in CartoDB
 # TODO: It would probably be a good idea to check if it has the expected attribute fields
 if not run_query(u"SELECT * FROM {0} LIMIT 1".format(cartodb_layer)):
     print("Table does not seem to exist in CartoDB. Right now, this script only does updates. Now exiting.")
     sys.exit()
 
-# Tell the user that something is happening
-print('Loading {0} pieces of data'.format(len(data['features'])))
-
-
 # Clean up existing table and restart the sequence.
+print("Clearing existing data")
 run_query('TRUNCATE {0}'.format(cartodb_layer))
 run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_layer))
 
@@ -115,35 +118,45 @@ run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_laye
 # have the same attributes).
 properties = data['features'][0]['properties'].keys()
 
+# Tell the user that something is happening
+print('Loading {0} pieces of data'.format(len(data['features'])))
+
 # Run through the features and insert them.
-# TODO: Do bulk inserts. Maybe in groups of 5-10 to be safe?
 # TODO: Maybe the requests could be done asynchronously
-for feature in data['features']:
-    # Convert the geomertry to a wkb using shapely
-    geom = geometry.shape(feature['geometry'])
-    geom_type = feature['geometry']['type']
-    feat_wkb = geom.wkb.encode('hex')
+for data_chunk in chunks(data['features'],options.chunk_size):
     # Construct a list of fields to be inserted (add the_geom and cartodb_id)
     fields = u','.join(properties+['the_geom','cartodb_id'])
 
-    # Construct a list of values to be inserted. Properties from the feature,
-    # as well as the geometry and the next id in the sequence.
-    values = props_to_values(properties, feature['properties'])
+    chunk_values = []
+    for feature in data_chunk:
+        # Convert the geomertry to a wkb using shapely
+        geom = geometry.shape(feature['geometry'])
+        geom_type = feature['geometry']['type']
+        feat_wkb = geom.wkb.encode('hex')
 
-    # Because of Mapnik issues with vertice direction, force all polygons to
-    # be in right hand direction.
-    if geom_type == "MultiPolygon" or geom_type == 'Polygon':
-        values.append(u"ST_ForceRHR(ST_GeomFromWKB(E'\\\\x{0}',4326))".format(feat_wkb))
-    else:
-        values.append(u"ST_GeomFromWKB(E'\\\\x{0}',4326)".format(feat_wkb))
+        # Construct a list of values to be inserted. Properties from the feature,
+        # as well as the geometry and the next id in the sequence.
+        values = props_to_values(properties, feature['properties'])
 
-    values.append(u"nextval('{0}_cartodb_id_seq')".format(cartodb_layer))
-    values = u','.join(values)
+        # Because of Mapnik issues with vertice direction, force all polygons to
+        # be in right hand direction.
+        if geom_type == "MultiPolygon" or geom_type == 'Polygon':
+            values.append(u"ST_ForceRHR(ST_GeomFromWKB(E'\\\\x{0}',4326))".format(feat_wkb))
+        else:
+            values.append(u"ST_GeomFromWKB(E'\\\\x{0}',4326)".format(feat_wkb))
 
-    # Construct the final insert statement and run it.
-    q = u"INSERT INTO {0} ({1}) VALUES({2})".format(cartodb_layer, fields, values)
+        # Add default next id.
+        values.append(u"nextval('{0}_cartodb_id_seq')".format(cartodb_layer))
+
+        # Add value list to the list of value lists :-)
+        chunk_values.append(u'(' + u','.join(values) + u')')
+
+    # Construct the insert statement and run it.
+    q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(chunk_values))
     run_query(q)
 
 # Run vacuum on the table
-run_query(u"UPDATE {0} SET the_geom = ST_ForceRHR(the_geom)".format(cartodb_layer))
+print("Vacuuming table")
 run_query(u"VACUUM {0}".format(cartodb_layer))
+
+print "Done"
