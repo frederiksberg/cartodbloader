@@ -103,11 +103,27 @@ def chunks(l, n):
     for i in xrange(0, len(l), n):
         yield l[i:i+n]
 
-# Check if the target table is in CartoDB
+# Check target geometry type. If not found, it is missing.
 # TODO: It would probably be a good idea to check if it has the expected attribute fields
-if not run_query(u"SELECT * FROM {0} LIMIT 1".format(cartodb_layer)):
+q = u"SELECT type FROM geometry_columns WHERE f_table_name = '{0}' AND f_geometry_column = 'the_geom'".format(cartodb_layer)
+cdb_geom_result = run_query(q)
+if not cdb_geom_result:
     print("Table does not seem to exist in CartoDB. Right now, this script only does updates. Now exiting.")
     sys.exit()
+else:
+    cdb_geom_type = json.loads(cdb_geom_result)['rows'][0]['type']
+
+# Inform the user
+print("Target geometry type is {0}".format(cdb_geom_type))
+
+# Determine which functions should be used to promote non-multi geometries
+# to multi, if they should appear in the data
+if cdb_geom_type == 'MULTIPOLYGON':
+    promote_to_multi = geometry.multipolygon.asMultiPolygon
+elif cdb_geom_type == 'MULTILINESTRING':
+    promote_to_multi = geometry.multilinestring.asMultiLineString
+elif cdb_geom_type == 'MULTIPOINT':
+    promote_to_multi = shapely.geometry.multipoint.asMultiPoint
 
 # Clean up existing table and restart the sequence.
 print("Clearing existing data")
@@ -132,6 +148,8 @@ for data_chunk in chunks(data['features'],options.chunk_size):
         # Convert the geomertry to a wkb using shapely
         geom = geometry.shape(feature['geometry'])
         geom_type = feature['geometry']['type']
+        if not cdb_geom_type == 'GEOMETRY' and not geom_type.upper() == cdb_geom_type:
+            geom = promote_to_multi([geom])
         feat_wkb = geom.wkb.encode('hex')
 
         # Construct a list of values to be inserted. Properties from the feature,
