@@ -141,7 +141,10 @@ print('Loading {0} pieces of data'.format(len(data['features'])))
 # TODO: Maybe the requests could be done asynchronously
 for data_chunk in chunks(data['features'],options.chunk_size):
     # Construct a list of fields to be inserted (add the_geom and cartodb_id)
-    field_list = ['"' + s + '"' for s in properties+['the_geom','cartodb_id']]
+    # ogr2ogr does not remove spaces, but still lowercases the field names
+    # Only ascii characters ar lowercased by ogr2ogr, so unicode needs to be
+    # encoded before lowercasing.
+    field_list = ['"' + s.encode('utf8').lower().decode('utf8') + '"' for s in properties+[u'the_geom',u'cartodb_id']]
     fields = u','.join(field_list)
 
     chunk_values = []
