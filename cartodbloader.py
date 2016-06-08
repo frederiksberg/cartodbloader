@@ -149,6 +149,10 @@ for data_chunk in chunks(data['features'],options.chunk_size):
 
     chunk_values = []
     for feature in data_chunk:
+        # Check if geometry is present. We don't want nonspatial data in cartoDB
+        if not feature['geometry']:
+            continue
+
         # Convert the geomertry to a wkb using shapely
         geom = geometry.shape(feature['geometry'])
         geom_type = feature['geometry']['type']
