@@ -141,7 +141,8 @@ print('Loading {0} pieces of data'.format(len(data['features'])))
 # TODO: Maybe the requests could be done asynchronously
 for data_chunk in chunks(data['features'],options.chunk_size):
     # Construct a list of fields to be inserted (add the_geom and cartodb_id)
-    fields = u','.join(properties+['the_geom','cartodb_id'])
+    field_list = ['"' + s + '"' for s in properties+['the_geom','cartodb_id']]
+    fields = u','.join(field_list)
 
     chunk_values = []
     for feature in data_chunk:
