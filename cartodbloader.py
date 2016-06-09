@@ -33,37 +33,6 @@ from shapely import wkb, geometry
 from urllib2 import Request, urlopen, URLError
 from optparse import OptionParser
 
-# OptParse setup
-parser = OptionParser(usage="usage: %prog [options] target_table source_file")
-parser.add_option("-k", "--apikey", dest="apikey", help="API key for CartoDB")
-parser.add_option("-a", "--account", dest="account", default="frederiksberg", help="CartoDB account name")
-parser.add_option("-u", "--url", dest="url", help="Custom URL endpoint")
-parser.add_option("-c", "--chunk-size", type="int", dest="chunk_size", default=50, help="Chunk size of bulk inserts")
-(options, args) = parser.parse_args()
-
-# Check if required arguments are present
-if not args or len(args) < 2:
-    parser.error("Not enough arguments")
-if not options.apikey:
-    parser.error("An API key is required for writing data to CartoDB")
-if not (bool(options.url) != bool(options.account)):
-    parser.error("You need to provide an account or a custom URL (and not both)")
-
-# Setup basic parameters
-input_file = args[1]
-cartodb_layer = args[0]
-cartodb_api_key = options.apikey
-
-# If a custom url is provided, use it. Alternatively, construct one from account
-if options.url:
-    cartodb_api_url = url
-else:
-    cartodb_api_url = u'https://{0}.cartodb.com/api/v2/sql'.format(options.account)
-
-# Get data from input file
-with open(input_file,'r') as f:
-    data = json.load(f)
-
 def feature_to_values(feature, properties, expected_geom_type, promote_to_multi):
     """This function takes a feature and converts it to a list of values to be
     inserted by a PostgreSQL insert statement. It is in the order dictated by
@@ -127,67 +96,103 @@ def chunks(l, n):
     for i in xrange(0, len(l), n):
         yield l[i:i+n]
 
-# Check target geometry type. If not found, it is missing.
-# TODO: It would probably be a good idea to check if it has the expected attribute fields
-q = u"SELECT type FROM geometry_columns WHERE f_table_name = '{0}' AND f_geometry_column = 'the_geom'".format(cartodb_layer)
-cdb_geom_result = run_query(q)
-if not cdb_geom_result:
-    print("Table does not seem to exist in CartoDB. Right now, this script only does updates. Now exiting.")
-    sys.exit()
-else:
-    cdb_geom_type = json.loads(cdb_geom_result)['rows'][0]['type']
+def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
+    # Check target geometry type. If not found, it is missing.
+    # TODO: It would probably be a good idea to check if it has the expected attribute fields
+    q = u"SELECT type FROM geometry_columns WHERE f_table_name = '{0}' AND f_geometry_column = 'the_geom'".format(cartodb_layer)
+    cdb_geom_result = run_query(q)
+    if not cdb_geom_result:
+        print("Table does not seem to exist in CartoDB. Right now, this script only does updates. Now exiting.")
+        sys.exit()
+    else:
+        cdb_geom_type = json.loads(cdb_geom_result)['rows'][0]['type']
 
-# Inform the user
-print("Target geometry type is {0}".format(cdb_geom_type))
+    # Inform the user
+    print("Target geometry type is {0}".format(cdb_geom_type))
 
-# Determine which functions should be used to promote non-multi geometries
-# to multi, if they should appear in the data
-if cdb_geom_type == 'MULTIPOLYGON':
-    promote_to_multi = geometry.multipolygon.asMultiPolygon
-elif cdb_geom_type == 'MULTILINESTRING':
-    promote_to_multi = geometry.multilinestring.asMultiLineString
-elif cdb_geom_type == 'MULTIPOINT':
-    promote_to_multi = shapely.geometry.multipoint.asMultiPoint
-else:
-    promote_to_multi = None
+    # Determine which functions should be used to promote non-multi geometries
+    # to multi, if they should appear in the data
+    if cdb_geom_type == 'MULTIPOLYGON':
+        promote_to_multi = geometry.multipolygon.asMultiPolygon
+    elif cdb_geom_type == 'MULTILINESTRING':
+        promote_to_multi = geometry.multilinestring.asMultiLineString
+    elif cdb_geom_type == 'MULTIPOINT':
+        promote_to_multi = shapely.geometry.multipoint.asMultiPoint
+    else:
+        promote_to_multi = None
 
-# Clean up existing table and restart the sequence.
-print("Clearing existing data")
-run_query('TRUNCATE {0}'.format(cartodb_layer))
-run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_layer))
+    # Clean up existing table and restart the sequence.
+    print("Clearing existing data")
+    run_query('TRUNCATE {0}'.format(cartodb_layer))
+    run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_layer))
 
-# Get a list of attributes from the first feature (assumes that all features
-# have the same attributes).
-properties = data['features'][0]['properties'].keys()
+    # Get a list of attributes from the first feature (assumes that all features
+    # have the same attributes).
+    properties = data['features'][0]['properties'].keys()
 
-# Tell the user that something is happening
-print('Loading {0} pieces of data'.format(len(data['features'])))
+    # Tell the user that something is happening
+    print('Loading {0} pieces of data'.format(len(data['features'])))
 
-# Run through the features and insert them.
-# TODO: Maybe the requests could be done asynchronously
-for data_chunk in chunks(data['features'],options.chunk_size):
-    # Construct a list of fields to be inserted (add the_geom and cartodb_id)
-    # ogr2ogr does not remove spaces, but still lowercases the field names
-    # Only ascii characters ar lowercased by ogr2ogr, so unicode needs to be
-    # encoded before lowercasing.
-    field_list = ['"' + s.encode('utf8').lower().decode('utf8') + '"' for s in properties+[u'the_geom',u'cartodb_id']]
-    fields = u','.join(field_list)
+    # Run through the features and insert them.
+    # TODO: Maybe the requests could be done asynchronously
+    for chunk in chunks(data['features'],options.chunk_size):
+        # Construct a list of fields to be inserted (add the_geom and cartodb_id)
+        # ogr2ogr does not remove spaces, but still lowercases the field names
+        # Only ascii characters ar lowercased by ogr2ogr, so unicode needs to be
+        # encoded before lowercasing.
+        field_list = ['"' + s.encode('utf8').lower().decode('utf8') + '"' for s in properties+[u'the_geom',u'cartodb_id']]
+        fields = u','.join(field_list)
 
-    value_parts = []
-    for feature in data_chunk:
-        # Check if geometry is present. We don't want nonspatial data in cartoDB
-        if feature['geometry']:
-            value_part = feature_to_values(feature, properties,
-                                           cdb_geom_type, promote_to_multi)
-            # Add value list to the list of value lists :-)
-            value_parts.append(value_part)
+        value_parts = []
+        for feature in chunk:
+            # Check if geometry is present. We don't want nonspatial data in cartoDB
+            if feature['geometry']:
+                value_part = feature_to_values(feature, properties,
+                                               cdb_geom_type, promote_to_multi)
+                # Add value list to the list of value lists :-)
+                value_parts.append(value_part)
 
-    # Construct the insert statement and run it.
-    q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(value_parts))
-    run_query(q)
+        # Construct the insert statement and run it.
+        q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(value_parts))
+        run_query(q)
 
-# Run vacuum on the table
-print("Vacuuming table")
-run_query(u"VACUUM {0}".format(cartodb_layer))
+    # Run vacuum on the table
+    print("Vacuuming table")
+    run_query(u"VACUUM {0}".format(cartodb_layer))
 
-print "Done"
+    print "Done"
+
+if __name__ == "__main__":
+    # OptParse setup
+    parser = OptionParser(usage="usage: %prog [options] target_table source_file")
+    parser.add_option("-k", "--apikey", dest="apikey", help="API key for CartoDB")
+    parser.add_option("-a", "--account", dest="account", default="frederiksberg", help="CartoDB account name")
+    parser.add_option("-u", "--url", dest="url", help="Custom URL endpoint")
+    parser.add_option("-c", "--chunk-size", type="int", dest="chunk_size", default=50, help="Chunk size of bulk inserts")
+    (options, args) = parser.parse_args()
+
+    # Check if required arguments are present
+    if not args or len(args) < 2:
+        parser.error("Not enough arguments")
+    if not options.apikey:
+        parser.error("An API key is required for writing data to CartoDB")
+    if not (bool(options.url) != bool(options.account)):
+        parser.error("You need to provide an account or a custom URL (and not both)")
+
+    # Setup basic parameters
+    input_file = args[1]
+    cartodb_layer = args[0]
+    cartodb_api_key = options.apikey
+
+    # If a custom url is provided, use it. Alternatively, construct one from account
+    if options.url:
+        cartodb_api_url = url
+    else:
+        cartodb_api_url = u'https://{0}.cartodb.com/api/v2/sql'.format(options.account)
+
+    # Get data from input file
+    with open(input_file,'r') as f:
+        data = json.load(f)
+
+    # Actually do something
+    main(cartodb_api_url, cartodb_layer, cartodb_api_key, data)
