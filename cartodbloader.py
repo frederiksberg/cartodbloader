@@ -64,20 +64,44 @@ else:
 with open(input_file,'r') as f:
     data = json.load(f)
 
-def props_to_values(properties,data):
-    """Function to convert feature properties to a list of values to be used
-    in constructing a SQL insert. Strings have single-quotes added and None are
-    converted to NULL"""
+def feature_to_values(feature, properties, expected_geom_type, promote_to_multi):
+    """This function takes a feature and converts it to a list of values to be
+    inserted by a PostgreSQL insert statement. It is in the order dictated by
+    the properties list, followed by the geometry and then by the id.
+    """
+    # Convert the geomertry to a wkb using shapely
+    geom = geometry.shape(feature['geometry'])
+    geom_type = feature['geometry']['type']
+    if not expected_geom_type == 'GEOMETRY' \
+        and not geom_type.upper() == expected_geom_type:
+            geom = promote_to_multi([geom])
+    feat_wkb = geom.wkb.encode('hex')
+
+    # Convert feature properties to a list of values to be used
+    # in constructing a SQL insert. Strings have single-quotes added and None are
+    # converted to NULL
     values = []
     for p in properties:
-        value = data[p]
+        value = feature['properties'][p]
         if value.__class__ == unicode:
             values.append(u"'{0}'".format(value.replace('\'','\'\'')))
         elif value.__class__ == None.__class__:
             values.append(u'NULL')
         else:
             values.append(u'{0}'.format(value))
-    return values
+
+    # Append geometry to value list. Because of Mapnik issues with vertice
+    # direction, force all polygons to be in right hand direction.
+    if geom_type == "MultiPolygon" or geom_type == 'Polygon':
+        values.append(u"ST_ForceRHR(ST_GeomFromWKB(E'\\\\x{0}',4326))".format(feat_wkb))
+    else:
+        values.append(u"ST_GeomFromWKB(E'\\\\x{0}',4326)".format(feat_wkb))
+
+    # Add default next id.
+    values.append(u"nextval('{0}_cartodb_id_seq')".format(cartodb_layer))
+
+    # return value list
+    return(u'(' + u','.join(values) + u')')
 
 def run_query(q):
     """Function to run a query on the CartoDB SQL API"""
@@ -124,6 +148,8 @@ elif cdb_geom_type == 'MULTILINESTRING':
     promote_to_multi = geometry.multilinestring.asMultiLineString
 elif cdb_geom_type == 'MULTIPOINT':
     promote_to_multi = shapely.geometry.multipoint.asMultiPoint
+else:
+    promote_to_multi = None
 
 # Clean up existing table and restart the sequence.
 print("Clearing existing data")
@@ -147,38 +173,17 @@ for data_chunk in chunks(data['features'],options.chunk_size):
     field_list = ['"' + s.encode('utf8').lower().decode('utf8') + '"' for s in properties+[u'the_geom',u'cartodb_id']]
     fields = u','.join(field_list)
 
-    chunk_values = []
+    value_parts = []
     for feature in data_chunk:
         # Check if geometry is present. We don't want nonspatial data in cartoDB
-        if not feature['geometry']:
-            continue
-
-        # Convert the geomertry to a wkb using shapely
-        geom = geometry.shape(feature['geometry'])
-        geom_type = feature['geometry']['type']
-        if not cdb_geom_type == 'GEOMETRY' and not geom_type.upper() == cdb_geom_type:
-            geom = promote_to_multi([geom])
-        feat_wkb = geom.wkb.encode('hex')
-
-        # Construct a list of values to be inserted. Properties from the feature,
-        # as well as the geometry and the next id in the sequence.
-        values = props_to_values(properties, feature['properties'])
-
-        # Because of Mapnik issues with vertice direction, force all polygons to
-        # be in right hand direction.
-        if geom_type == "MultiPolygon" or geom_type == 'Polygon':
-            values.append(u"ST_ForceRHR(ST_GeomFromWKB(E'\\\\x{0}',4326))".format(feat_wkb))
-        else:
-            values.append(u"ST_GeomFromWKB(E'\\\\x{0}',4326)".format(feat_wkb))
-
-        # Add default next id.
-        values.append(u"nextval('{0}_cartodb_id_seq')".format(cartodb_layer))
-
-        # Add value list to the list of value lists :-)
-        chunk_values.append(u'(' + u','.join(values) + u')')
+        if feature['geometry']:
+            value_part = feature_to_values(feature, properties,
+                                           cdb_geom_type, promote_to_multi)
+            # Add value list to the list of value lists :-)
+            value_parts.append(value_part)
 
     # Construct the insert statement and run it.
-    q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(chunk_values))
+    q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(value_parts))
     run_query(q)
 
 # Run vacuum on the table
