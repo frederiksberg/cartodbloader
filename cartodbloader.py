@@ -82,7 +82,7 @@ def run_query(q, cartodb_api_key=None):
     try:
         # Send the request and try tro return the data from the response
         response = urlopen(request)
-        return(response.read())
+        return(json.loads(response.read()))
     except URLError, e:
         # On an error, write it to stderr
         # TODO: Figure out how to get the error data in the output
@@ -101,11 +101,11 @@ def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
     # TODO: It would probably be a good idea to check if it has the expected attribute fields
     q = u"SELECT type FROM geometry_columns WHERE f_table_name = '{0}' AND f_geometry_column = 'the_geom'".format(cartodb_layer)
     cdb_geom_result = run_query(q, cartodb_api_key)
-    if not cdb_geom_result:
+    if not cdb_geom_result['rows']:
         print("Table does not seem to exist in CartoDB. Right now, this script only does updates. Now exiting.")
         sys.exit()
     else:
-        cdb_geom_type = json.loads(cdb_geom_result)['rows'][0]['type']
+        cdb_geom_type = cdb_geom_result['rows'][0]['type']
 
     # Inform the user
     print("Target geometry type is {0}".format(cdb_geom_type))
