@@ -117,7 +117,7 @@ def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
     elif cdb_geom_type == 'MULTILINESTRING':
         promote_to_multi = geometry.multilinestring.asMultiLineString
     elif cdb_geom_type == 'MULTIPOINT':
-        promote_to_multi = shapely.geometry.multipoint.asMultiPoint
+        promote_to_multi = geometry.multipoint.asMultiPoint
     else:
         promote_to_multi = None
 
