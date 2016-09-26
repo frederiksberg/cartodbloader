@@ -33,7 +33,7 @@ from shapely import wkb, geometry
 from urllib2 import Request, urlopen, URLError
 from optparse import OptionParser
 
-def feature_to_values(feature, properties, expected_geom_type, promote_to_multi):
+def feature_to_values(cartodb_layer, feature, properties, expected_geom_type, promote_to_multi):
     """This function takes a feature and converts it to a list of values to be
     inserted by a PostgreSQL insert statement. It is in the order dictated by
     the properties list, followed by the geometry and then by the id.
@@ -96,7 +96,7 @@ def chunks(l, n):
     for i in xrange(0, len(l), n):
         yield l[i:i+n]
 
-def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
+def main(cartodb_api_url, cartodb_layer, data, cartodb_api_key=None, chunk_size=50):
     # Check target geometry type. If not found, it is missing.
     # TODO: It would probably be a good idea to check if it has the expected attribute fields
     q = u"SELECT type FROM geometry_columns WHERE f_table_name = '{0}' AND f_geometry_column = 'the_geom'".format(cartodb_layer)
@@ -123,8 +123,8 @@ def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
 
     # Clean up existing table and restart the sequence.
     print("Clearing existing data")
-    run_query('TRUNCATE {0}'.format(cartodb_layer))
-    run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_layer))
+    run_query('TRUNCATE {0}'.format(cartodb_layer),cartodb_api_key)
+    run_query('ALTER SEQUENCE {0}_cartodb_id_seq RESTART WITH 1'.format(cartodb_layer),cartodb_api_key)
 
     # Get a list of attributes from the first feature (assumes that all features
     # have the same attributes).
@@ -135,7 +135,7 @@ def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
 
     # Run through the features and insert them.
     # TODO: Maybe the requests could be done asynchronously
-    for chunk in chunks(data['features'],options.chunk_size):
+    for chunk in chunks(data['features'],chunk_size):
         # Construct a list of fields to be inserted (add the_geom and cartodb_id)
         # ogr2ogr does not remove spaces, but still lowercases the field names
         # Only ascii characters ar lowercased by ogr2ogr, so unicode needs to be
@@ -147,18 +147,18 @@ def main(cartodb_api_url, cartodb_layer, cartodb_api_key, data):
         for feature in chunk:
             # Check if geometry is present. We don't want nonspatial data in cartoDB
             if feature['geometry']:
-                value_part = feature_to_values(feature, properties,
+                value_part = feature_to_values(cartodb_layer, feature, properties,
                                                cdb_geom_type, promote_to_multi)
                 # Add value list to the list of value lists :-)
                 value_parts.append(value_part)
 
         # Construct the insert statement and run it.
         q = u"INSERT INTO {0} ({1}) VALUES {2}".format(cartodb_layer, fields, u",".join(value_parts))
-        run_query(q)
+        run_query(q,cartodb_api_key)
 
     # Run vacuum on the table
     print("Vacuuming table")
-    run_query(u"VACUUM {0}".format(cartodb_layer))
+    run_query(u"VACUUM {0}".format(cartodb_layer),cartodb_api_key)
 
     print "Done"
 
@@ -195,4 +195,5 @@ if __name__ == "__main__":
         data = json.load(f)
 
     # Actually do something
-    main(cartodb_api_url, args.cartodb_layer, args.cartodb_api_key, data)
+    main(cartodb_api_url, args.cartodb_layer, data,
+            cartodb_api_key=args.cartodb_api_key, chunk_size=args.chunk_size)
